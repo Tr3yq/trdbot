@@ -1,7 +1,4 @@
 import os
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
 import logging
 import numpy as np
 import pandas as pd
@@ -724,66 +721,100 @@ class AdvancedMarketAnalyzer:
             return df
     
     def _calculate_microstructure_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Индикаторы микроструктуры рынка"""
-        try:
-            # ORDER FLOW ANALYSIS
-            if "taker_buy_volume" in df.columns:
-                df["volume_delta"] = df["taker_buy_volume"] - (df["volume"] - df["taker_buy_volume"])
-                df["volume_delta_sma"] = df["volume_delta"].rolling(20).mean()
-                df["cumulative_delta"] = df["volume_delta"].cumsum()
-            else:
-                df["volume_delta"] = 0
-                df["volume_delta_sma"] = 0
-                df["cumulative_delta"] = 0
-            
-            # LIQUIDITY INDICATORS
-            df["spread_approx"] = (df["high"] - df["low"]) / df["typical_price"] * 10000  # basis points
-            
-            # Market Impact
-            returns_abs = abs(df["close"].pct_change())
-            volume_normalized = df["volume"] / df["volume"].rolling(50).mean()
-            df["market_impact"] = returns_abs / (volume_normalized + 1e-10)
-            df["liquidity_score"] = 1 / (1 + df["market_impact"])
-            
-            # INSTITUTIONAL FLOW
-            volume_z_score = (df["volume"] - df["volume"].rolling(50).mean()) / df["volume"].rolling(50).std()
-            df["large_trades"] = (volume_z_score > 2).astype(int)
-            
-            # Institutional pressure
-            green_candle = df["close"] > df["open"]
-            high_volume = df["volume"] > df["volume"].rolling(20).mean() * 1.5
-            large_body = abs(df["close"] - df["open"]) > df.get("atr_14", df["close"] * 0.02) * 0.5
-            
-            df["institutional_buying"] = (green_candle & high_volume & large_body).astype(int)
-            df["institutional_selling"] = ((~green_candle) & high_volume & large_body).astype(int)
-            df["institutional_pressure"] = (df["institutional_buying"] - df["institutional_selling"]).rolling(10).sum()
-            
-            # TRADE SIZE ANALYSIS
-            if "trades_count" in df.columns:
-                avg_trade_size = df["volume"] / (df["trades_count"] + 1)
-                df["avg_trade_size"] = avg_trade_size
-                df["large_trade_ratio"] = (avg_trade_size > avg_trade_size.rolling(50).mean() * 2).astype(int)
-                df["trade_intensity"] = df["trades_count"] / df["trades_count"].rolling(20).mean()
-            else:
-                df["avg_trade_size"] = df["volume"] / 100  # Приближение
-                df["large_trade_ratio"] = 0
-                df["trade_intensity"] = 1
-            
-            # SMART MONEY INDICATORS
+    """Индикаторы микроструктуры рынка - оптимизированная версия"""
+    try:
+        # Создаем словарь для новых колонок
+        new_columns = {}
+        
+        # === ORDER FLOW ANALYSIS ===
+        if "taker_buy_volume" in df.columns:
+            volume_delta = df["taker_buy_volume"] - (df["volume"] - df["taker_buy_volume"])
+            new_columns["volume_delta"] = volume_delta
+            new_columns["volume_delta_sma"] = volume_delta.rolling(20).mean()
+            new_columns["cumulative_delta"] = volume_delta.cumsum()
+        else:
+            new_columns["volume_delta"] = 0
+            new_columns["volume_delta_sma"] = 0
+            new_columns["cumulative_delta"] = 0
+        
+        # === LIQUIDITY INDICATORS ===
+        new_columns["spread_approx"] = (df["high"] - df["low"]) / df["typical_price"] * 10000  # basis points
+        
+        # Market Impact
+        returns_abs = abs(df["close"].pct_change())
+        volume_normalized = df["volume"] / df["volume"].rolling(50).mean()
+        market_impact = returns_abs / (volume_normalized + 1e-10)
+        new_columns["market_impact"] = market_impact
+        new_columns["liquidity_score"] = 1 / (1 + market_impact)
+        
+        # === INSTITUTIONAL FLOW ===
+        
+        # Large Trade Detection
+        volume_z_score = (df["volume"] - df["volume"].rolling(50).mean()) / df["volume"].rolling(50).std()
+        new_columns["large_trades"] = (volume_z_score > 2).astype(int)
+        
+        # Institutional Buying/Selling Pressure
+        green_candle = df["close"] > df["open"]
+        high_volume = df["volume"] > df["volume"].rolling(20).mean() * 1.5
+        body_size = abs(df["close"] - df["open"])
+        large_body = body_size > body_size.rolling(20).mean() * 1.5
+        
+        institutional_buying = (green_candle & high_volume & large_body).astype(int)
+        institutional_selling = ((~green_candle) & high_volume & large_body).astype(int)
+        
+        new_columns["institutional_buying"] = institutional_buying
+        new_columns["institutional_selling"] = institutional_selling
+        new_columns["institutional_pressure"] = (institutional_buying - institutional_selling).rolling(10).sum()
+        
+        # === TIME & SALES PATTERNS ===
+        if "trades_count" in df.columns:
+            avg_trade_size = df["volume"] / df["trades_count"].replace(0, np.nan)
+            new_columns["avg_trade_size"] = avg_trade_size
+            new_columns["large_trade_ratio"] = (avg_trade_size > avg_trade_size.rolling(50).mean() * 2).astype(int)
+            new_columns["trade_intensity"] = df["trades_count"] / df["trades_count"].rolling(20).mean()
+        else:
+            new_columns["avg_trade_size"] = df["volume"] / 100  # Приближение
+            new_columns["large_trade_ratio"] = 0
+            new_columns["trade_intensity"] = 1
+        
+        # === SMART MONEY INDICATORS ===
+        
+        # Smart Money Index detection
+        first_30min = df.index.time <= pd.Timestamp("10:00").time() if hasattr(df.index, 'time') else False
+        last_30min = df.index.time >= pd.Timestamp("15:30").time() if hasattr(df.index, 'time') else False
+        
+        if isinstance(first_30min, bool):
+            # Если индекс не временной, используем альтернативную логику
             price_change = abs(df["close"].pct_change())
             volume_ratio = df["volume"] / df["volume"].rolling(20).mean()
-            
-            df["smart_money_index"] = np.where(
+            new_columns["smart_money_index"] = np.where(
                 (price_change > price_change.rolling(20).quantile(0.8)) & 
                 (volume_ratio < 0.8), 1, 0
             )
-            
-            # VOLATILITY CLUSTERING
-            returns = df["close"].pct_change()
-            returns_squared = returns ** 2
-            df["vol_clustering"] = returns_squared.rolling(5).mean() / returns_squared.rolling(50).mean()
-            
-            return df
+        else:
+            new_columns["smart_money_index"] = np.where(
+                first_30min,
+                -df["volume"],  # Отрицательный объем в первые 30 минут
+                np.where(last_30min, df["volume"], 0)  # Положительный в последние 30 минут
+            ).cumsum()
+        
+        # === VOLATILITY CLUSTERING ===
+        returns = df["close"].pct_change()
+        returns_squared = returns ** 2
+        vol_clustering_denominator = returns_squared.rolling(50).mean()
+        new_columns["vol_clustering"] = returns_squared.rolling(5).mean() / (vol_clustering_denominator + 1e-10)
+        
+        # Создаем новый DataFrame из всех колонок
+        new_df = pd.DataFrame(new_columns, index=df.index)
+        
+        # Объединяем с исходным DataFrame за один раз
+        result = pd.concat([df, new_df], axis=1)
+        
+        return result
+        
+    except Exception as e:
+        self.logger.error(f"❌ Ошибка микроструктурных индикаторов: {e}")
+        return  df
             
         except Exception as e:
             self.logger.error(f"❌ Ошибка микроструктурных индикаторов: {e}")
@@ -1795,4 +1826,5 @@ def create_market_analyzer(config: Config) -> AdvancedMarketAnalyzer:
     
     
     
+
                 
